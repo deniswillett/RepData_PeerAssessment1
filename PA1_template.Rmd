@@ -1,20 +1,324 @@
-# Reproducible Research: Peer Assessment 1
+Activity Monitoring Data Processing and Analysis
+========================================================
+Denis Willett
 
 
-## Loading and preprocessing the data
+#### Set Global Obtions and Load Libraries
+First we'll set the global options so that warning messages do not appear and figures are appropriately sized.  
+
+```{r global_options, include=TRUE}
+opts_chunk$set(fig.width=8, fig.height=6,
+               echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+Next we'll load libraries to be used for data analysis.  I'm partial to *ggplot2*, so thats what'll be used for plotting.  *Lubridate* makes dates relatively easy; *dplyr* and *reshape2* help with data manipulation.  
 
 
+```{r load_libraries}
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+library(scales)
+library(grid)
+library(reshape2)
+```
+
+
+## Loading and Preprocessing the Data
+Now its time to load the data and briefly examine it.  
+
+```{r load_data}
+act=read.csv('activity.csv') #Make Sure working directory is appropriate
+head(act); tail(act); str(act)
+```
+
+Initially it looks like no preprocessing is needed.  Some tweeks might be required for individual subsequent analysis, but by and large the data should initially work well as is.  
 
 ## What is mean total number of steps taken per day?
 
+Now we can delve into playing with the data.  The first step is to determine the total number of steps (in units of 1000 steps) taken per day.  
 
+```{r daily_steps}
+tots=act %.% 
+        group_by(date) %.%
+        summarize(tsteps=sum(steps, na.rm=TRUE)/1000)
+head(tots)
+```
+
+
+Next, based on those calculations we'll calculate the mean and median total number of steps per day in thousands of steps.
+
+```{r summary_stats1}
+summs=data.frame(Type=c('Mean','Median'), 
+                 Vals=c(mean(tots$tsteps, na.rm=TRUE),
+                        median(tots$tsteps, na.rm=TRUE)))
+summs
+```
+
+Then we'll plot those data in a nice histogram with the mean and median overlaid.   
+
+```{r steps_histogram}
+ggplot()+geom_histogram(data=tots, aes(x=tsteps), binwidth=1)+
+        theme_bw(14)+
+        geom_vline(data=summs, aes(xintercept=Vals, color=Type),
+                                   show_guide=TRUE)+
+        theme(legend.position='bottom', 
+              legend.title=element_blank())+
+        labs(x='Thousands of Steps', y='Count', title='Figure 1')+
+        annotate('text', x=5, y=8, 
+                 label=paste('Mean =', round(summs$Vals[1],3)))+
+        annotate('text', x=5, y=7, 
+                 label=paste('Median =', round(summs$Vals[2],3)))
+
+```
 
 ## What is the average daily activity pattern?
 
+To calculate this, we'll first have to average across all days grouping by interval.  For this, NAs will be excluded from the analysis.  We'll also add a column with *lubridate* to facilitate time plotting later.  
 
+```{r interval_steps}
+int_steps=act %.%
+        group_by(interval) %.%
+        summarize(isteps=mean(steps, na.rm=TRUE)) %.%
+        mutate(time=seq(mdy_hms('1/1/2000 00:00:00'), 
+                    mdy_hms('1/1/2000 23:55:00'), by=300 ))
+
+head(int_steps)
+```
+
+Now lets see what the maximum is.  
+
+```{r max_interval}
+mx=max(int_steps$isteps)
+
+int_steps[which(int_steps$isteps == mx),]
+```
+
+Cool! Looks like the maximum is `r mx` at `r format(int_steps[which(int_steps$isteps == mx),]$time, '%H:%M %p')`.  
+
+
+Now we'll plot the average number of daily steps by time intervals ranging from the start at midnight for a full day and label the maximum point.   
+
+```{r plot_intervals}
+tmim=int_steps[which(int_steps$isteps == mx),]$time
+
+ggplot()+geom_line(data=int_steps, aes(x=time, y=isteps))+
+        theme_bw(14)+
+        scale_x_datetime(labels=date_format('%I %p'),
+                         breaks=date_breaks('4 hour'))+
+        labs(x='', y='Average Daily Steps', title='Figure 2')+
+        geom_segment(aes(x=tmim+8000, xend=tmim+1000, y=206,
+                         yend=206), arrow=
+                             arrow(length=unit(0.24, 'cm')))+
+        annotate('text', x=tmim+14000, y=206, label='8:35 AM')
+
+```
 
 ## Imputing missing values
 
+#### 1. Determine number of NAs
+Now we'll see how many NAs there are and if imputing values changes our interpretations.  First, how many NAs are there?
 
+```{r count_NAs}
+sum(is.na(act$steps))
+```
+
+It looks like we have `r sum(is.na(act$steps))` NAs.  We have some imputing to do!
+
+#### 2. Develop Imputation Strategy
+First lets look at the entire data set and see where the gaps are.  
+
+```{r plot_all}
+plotall=mutate(act, 
+            time=seq(ymd_hms(paste(first(act$date), '00:00:00')),
+                     ymd_hms(paste(last(act$date), '23:55:00')), 
+                         by=300),
+            hr=hour(time), min=minute(time))
+
+ggplot(plotall, aes(x=time, y=steps))+geom_line()+
+               theme_bw(14)+
+        labs(y='Number of Steps', x='', title='Figure 3')
+```
+
+It looks like there aren't sporadic gaps so much as complete days where the data are missing - which could represent days when the individual did not wear the device (somewhat odd though given the precise stop and start times at midnight).  Lets check that by examining the temporal distribution of NAs.  
+
+
+```{r missing_values}
+whereNA=plotall %.%
+        group_by(month(time),day(time)) %.%
+        summarize( nn=sum(is.na(steps)),
+                   tm=first(time))
+
+ggplot(whereNA, aes(x=tm, y=nn))+geom_point()+
+        theme_bw(14)+
+        labs(x='', y='Number of Missing Values', title='Figure 4')
+```
+
+As expected, most days are complete, but some are entirely missing with 288 NAs, the total number of 5 minute intervals in a day.  
+
+Given that averaging over five minute intervals only gives a maximum number of steps around 206 (Figure 2), and our examination of the entire data set shows many values much larger than 206 (Figure 3), simply replacing the missing values with averages does not seem an adequate imputation strategy.  
+
+Lets examine week day activity patterns.  
+
+```{r daily_patterns, fig.height = 14}
+test=mutate(plotall, 
+            d=wday(time, label=TRUE, abbr=FALSE),
+            tm=rep(seq(mdy_hms('1/1/2000 00:00:00'), 
+                    mdy_hms('1/1/2000 23:55:00'), by=300 ),
+                    61))
+
+ggplot(test, aes(x=tm, y=steps, group=date))+geom_line()+
+        facet_wrap( ~ d, ncol=1)+
+        scale_x_datetime(labels=date_format('%I %p'),
+                         breaks=date_breaks('4 hour'))+
+        theme_bw(14, base_family='Avenir')+
+        labs(x='', y='Number of Steps', title='Figure 5')
+
+```
+
+It looks like each week day has specific patterns.  Lets give the user the benefit of the doubt and assume that the missing data resulted from a lapse in memory due to realitively high activity and compare the 75th percentile of activity to week day trends (blue line below).  
+
+```{r quantile_plots, fig.height=14}
+replot=test %.%
+        group_by(d, tm) %.%
+        summarize(av=mean(steps, na.rm=TRUE),
+                  qs=quantile(steps, 0.75, na.rm=TRUE))
+
+ggplot()+geom_line(data=test, aes(x=tm, y=steps, group=date))+
+        geom_line(data=replot, aes(x=tm, y=qs), color='blue')+
+        facet_wrap( ~ d, ncol=1)+
+        scale_x_datetime(labels=date_format('%I %p'),
+                         breaks=date_breaks('4 hour'))+
+        theme_bw(14)+
+        labs(x='', y='Number of Steps', title='Figure 6')
+
+```
+
+Qualitatively that strategy looks fairly decent.  It seems to avoid artificially depressing the number of steps as would be done with an average (the distributions are clearly not normal), but does not seem to be unduly influenced by outliers (ie one time events of peak activity).  Lets use that as our imputation strategy.  For each day of missing values, we'll take the values of the 75th percentiles for all time intervals and use them to replace the NA values.  
+
+```{r imputation}
+toget=tbl_df(merge(test, replot))
+nas=which(is.na(toget$steps))
+toget$steps[nas]=toget$qs[nas]
+
+```
+
+Great! Now lets compare a time series of our imputed values with the original data (from Figure 3) and see if there are any obvious anamolies.  
+
+```{r Imputation_comparison}
+ggplot(toget, aes(x=time, y=steps))+geom_line()+
+        theme_bw(14)+
+        labs(x='', y='Number of Steps', title='Figure 7')
+
+```
+
+Looks good!  Its hard to tell where the imputed values are.  
+
+#### 3. Create New Dataset with Imputed Values
+
+Now we'll select the columns we want to remake the original data set.  
+
+```{r remake_original}
+act2=toget %.%
+        select(steps, date, interval) %.%
+        arrange(date,interval)
+act2
+```
+
+
+#### 4. Histogram of Total Steps Each Day
+
+Next we'll compare the histograms and summary statistics for the imputed (ie Figure 1) and non-imputed data sets.  
+
+```{r comparison}
+colnames(act2)=c('imp_steps', 'date', 'interval')
+both=merge(act, act2)
+
+tots2=tbl_df(both %.% 
+        group_by(date) %.%
+        summarize(tsteps=sum(steps, na.rm=TRUE)/1000,
+                  timp_steps=sum(imp_steps, na.rm=TRUE)/1000))
+
+prep=melt(tots2, id.vars='date', variable.name='Type', 
+          value.name='thSt')
+levels(prep$Type)=c('Original Data', 'Imputed Data')
+
+sums2=prep %.%
+        group_by(Type) %.%
+        summarize(Mean=mean(thSt, na.rm=TRUE),
+                  Median=median(thSt, na.rm=TRUE))
+
+sums2=arrange(melt(sums2, id='Type'), Type)
+levels(sums2$Type)=c('Original Data', 'Imputed Data')
+
+txt=data.frame(thSt=rep(4.5,4), y=c(11,10,11,10), 
+               Type=rep(unique(prep$Type),each=2),
+               lab=c(paste('Mean =', 
+                             round(sums2[1,3],2)),
+                     paste('Median =', 
+                             round(sums2[2,3],2)),
+                     paste('Mean =', 
+                             round(sums2[3,3],2)),
+                     paste('Median =', 
+                             round(sums2[4,3],2))))
+
+ggplot()+geom_histogram(data=prep, aes(x=thSt), binwidth=1)+
+        facet_grid( . ~ Type)+
+        theme_bw(14)+
+        geom_vline(data=sums2, aes(xintercept=value, color=variable),
+                                   show_guide=TRUE)+
+        theme(legend.position='bottom', 
+              legend.title=element_blank())+
+        labs(x='Thousands of Steps', y='Count', title='Figure 8')+
+        geom_text(data=txt, aes(x=thSt, y=y, label=lab))
+
+```
+
+Wowsers!  It looks like the imputation did have an effect on the histograms and summary statistics (if the NAs were excluded from the original analysis).  Inclusion of the imputed values resulted in an increase in the mean and median values and shifted the distribution slightly to the left while removing many of the zeros.  
 
 ## Are there differences in activity patterns between weekdays and weekends?
+
+To look at differences between weekends and weekdays, we'll split the data set into the appropriate sections, label the factors, then recombine the dataset to plot it.  
+
+```{r weekend_weekday}
+wkend=toget %.%
+        filter(substr(d, 1,1) == 'S') %.%
+        mutate(split='Weekend')
+
+wkday=toget %.%
+        filter(substr(d, 1,1) != 'S') %.%
+        mutate(split='Weekday')
+
+wk=tbl_df(rbind(wkend, wkday))
+
+wk.summ=wk %.%
+        group_by(split, tm) %.%
+        summarize(av=mean(steps))
+
+ggplot(wk.summ, aes(x=tm, y=av))+geom_line()+
+        facet_wrap( ~ split, ncol=1)+theme_bw(14)+
+        labs(x='', y='Average Number of Steps', title='Figure 9')+
+        scale_x_datetime(labels=date_format('%I %p'),
+                         breaks=date_breaks('4 hour'))
+```
+
+Packages Cited
+--------------------------------------------------------
+Garrett Grolemund, Hadley Wickham (2011). Dates and Times Made Easy with lubridate. Journal of Statistical Software, 40(3), 1-25. URL http://www.jstatsoft.org/v40/i03/.
+
+Wickham, H. 2007. Reshaping data with the reshape package. J. Stat. Softw. 21.
+
+Wickham, H. 2009. ggplot2: elegant graphics for data analysis. Springer New York.
+
+Hadley Wickham and Romain Francois (2014). dplyr: dplyr: a grammar of data manipulation. R package version 0.1.3. http://CRAN.R-project.org/package=dplyr. 
+
+Hadley Wickham (2014). scales: Scale functions for graphics.. R package version 0.2.4. http://CRAN.R-project.org/package=scales.  
+
+
+Session Info
+-------------------------------------------------
+```{r session_info}
+sessionInfo()
+```
+
+
